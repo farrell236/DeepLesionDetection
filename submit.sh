@@ -9,4 +9,4 @@
 #SBATCH --time=10-00:00:00
 
 source /data/houbb/_venv/python39/bin/activate
-python main.py
+python main_fasterrcnn.py

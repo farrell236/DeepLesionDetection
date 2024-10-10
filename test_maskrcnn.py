@@ -9,12 +9,14 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from torchvision import datasets, models, tv_tensors
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from torchvision.transforms import v2 as T
 from torchvision.utils import draw_bounding_boxes
+from torchvision.utils import draw_segmentation_masks
 
 import utils
 
-# from engine import evaluate
+from engine import evaluate
 
 
 torch.manual_seed(0)
@@ -52,10 +54,10 @@ def get_transform():
 
 
 IMAGES_PATH = '/data/houbb/data/DeepLesion/Images_png'
-ANNOTATIONS_TEST = '/data/houbb/data/DeepLesion/annotation/deeplesion_test.json'
+ANNOTATIONS_TEST = '/data/houbb/data/DeepLesion/annotation2/deeplesion_test.json'
 
 dataset_test = DeepLesion(IMAGES_PATH, ANNOTATIONS_TEST, transforms=get_transform())
-dataset_test = datasets.wrap_dataset_for_transforms_v2(dataset_test, target_keys=("image_id", "boxes", "labels"))
+dataset_test = datasets.wrap_dataset_for_transforms_v2(dataset_test, target_keys=("image_id", "boxes", "masks", "labels"))
 
 
 a=1
@@ -63,11 +65,23 @@ a=1
 
 def get_model_instance_segmentation(num_classes):
     # load an instance segmentation model pre-trained on COCO
-    model = models.detection.fasterrcnn_resnet50_fpn(weights="DEFAULT")
+    model = models.detection.maskrcnn_resnet50_fpn(weights="DEFAULT")
+
     # get number of input features for the classifier
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     # replace the pre-trained head with a new one
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+
+    # now get the number of input features for the mask classifier
+    in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
+    hidden_layer = 256
+    # and replace the mask predictor with a new one
+    model.roi_heads.mask_predictor = MaskRCNNPredictor(
+        in_features_mask,
+        hidden_layer,
+        num_classes
+    )
+
     return model
 
 # train on the GPU or on the CPU, if a GPU is not available
@@ -85,7 +99,7 @@ data_loader_test = torch.utils.data.DataLoader(
 model = get_model_instance_segmentation(num_classes=2)
 
 # Load the state dictionary from the checkpoint
-state_dict = torch.load('checkpoints/fasterrcnn_resnet50_fpn_31.pth')
+state_dict = torch.load('checkpoints_maskrcnn/maskrcnn_resnet50_fpn_2.pth')
 
 # Load the state dictionary into the model
 model.load_state_dict(state_dict)
@@ -95,10 +109,10 @@ model.eval()
 
 # result = evaluate(model, data_loader_test, device=device)
 
-
-for i in range(42, 128, 4):
+idxs = np.random.randint(0, len(dataset_test), size=8)
+for i in idxs:
     with torch.no_grad():
-        image, target = dataset_test.__getitem__(i)
+        image, target = dataset_test.__getitem__(int(i))
         # convert RGBA -> RGB and move to device
         image = image.to(device)
         predictions = model([image, ])
@@ -107,8 +121,13 @@ for i in range(42, 128, 4):
     image = (255.0 * (image - image.min()) / (image.max() - image.min())).to(torch.uint8)
     pred_boxes = pred["boxes"].long()
     true_boxes = target['boxes'].long()
+    pred_masks = pred["masks"].bool()
+    true_masks = target["masks"].bool()
+
     pred_image = draw_bounding_boxes(image, pred_boxes[:1,:], colors="red").cpu()
     true_image = draw_bounding_boxes(image, true_boxes, colors="blue").cpu()
+    pred_image = draw_segmentation_masks(pred_image, pred_masks[:1,:][0], colors="red", alpha=0.4).cpu()
+    true_image = draw_segmentation_masks(true_image, true_masks, colors="blue", alpha=0.4).cpu()
 
     # Create a figure with two subplots
     fig, axs = plt.subplots(1, 2, figsize=(12, 6))
@@ -125,7 +144,7 @@ for i in range(42, 128, 4):
 
     # Display the plots
     # plt.tight_layout()
-    plt.savefig(f'imgdump/sample_{i}.png')
+    # plt.savefig(f'imgdump_2/sample_{i}.png')
     plt.show()
 
 a=1
