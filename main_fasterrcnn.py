@@ -33,7 +33,7 @@ config = {
     'scheduler': 'StepLR',
     'step_size': 3,
     'gamma': 0.1,
-    'model_save_folder': 'checkpoints_maskrcnn',
+    'model_save_folder': 'checkpoints_2',
     'log_interval': 10,
 }
 
@@ -154,13 +154,14 @@ metrics_names = [
 # Start training
 for epoch in range(config['num_epochs']):
     # train for one epoch, printing every 10 iterations
-    log_stats = train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq=10)
+    log_train = train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq=10)
+    log_train = {key: meter.value for key, meter in log_train.meters.items()}
     # save model
-    torch.save(model.state_dict(), f'checkpoints_2/fasterrcnn_resnet50_fpn_{epoch}.pth')
+    torch.save(model.state_dict(), f'{config["model_save_folder"]}/fasterrcnn_resnet50_fpn_{epoch}.pth')
     # update the learning rate
     lr_scheduler.step()
     # evaluate on the test dataset
-    log_stats = evaluate(model, data_loader_test, device=device)
-    bbox_stats = log_stats.coco_eval['bbox'].stats
+    log_eval = evaluate(model, data_loader_test, device=device)
+    bbox_stats = log_eval.coco_eval['bbox'].stats
     bbox_stats = {f'bbox {name}': bbox_stats[idx] for idx, name in enumerate(metrics_names)}
-    wandb.log({**log_stats, **bbox_stats})
+    wandb.log({**log_train, **bbox_stats})
