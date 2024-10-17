@@ -23,6 +23,15 @@ def calculate_ellipse_area(row):
     return np.pi * semi_major_axis * semi_minor_axis
 
 
+def convert_xyxy_to_xywh(bbox):
+    x1, y1, x2, y2 = map(float, bbox)  # Ensure all are floats for subtraction and rounding
+    x = round(x1, 3)
+    y = round(y1, 3)
+    width = round(x2 - x1, 3)
+    height = round(y2 - y1, 3)
+    return (x, y, width, height)
+
+
 df_new = pd.DataFrame()
 df_new['file_name'] = dl_info['File_name'].apply(lambda x: '/'.join(x.rsplit('_', 1)))
 df_new[['height', 'width']] = dl_info['Image_size'].str.split(', ', expand=True).astype(int)
@@ -33,6 +42,8 @@ df_new['z_position'] = dl_info['Normalized_lesion_location'].str.split(', ', exp
 df_new['windows'] = dl_info['DICOM_windows'].apply(lambda x: [float(num) for num in x.split(', ')])
 df_new['area'] = dl_info['Lesion_diameters_Pixel_'].apply(calculate_ellipse_area)
 df_new['bbox'] = dl_info['Bounding_boxes'].apply(lambda x: [float(num) for num in x.split(', ')])
+df_new['bbox'] = df_new['bbox'].apply(convert_xyxy_to_xywh)
+
 df_new['noisy'] = dl_info['Possibly_noisy']
 df_new['id'], _ = pd.factorize(df_new['file_name'])  # this should be unique image id
 

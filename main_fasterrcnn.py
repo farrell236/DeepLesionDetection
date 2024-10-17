@@ -14,7 +14,7 @@ import utils
 
 from engine import train_one_epoch, evaluate
 
-import wandb
+# import wandb
 
 # Ensure the W&B API key is set
 # if not os.getenv('WANDB_API_KEY'):
@@ -66,12 +66,6 @@ class DeepLesion(datasets.CocoDetection):
         image = Image.fromarray(np.stack([image]*3, axis=-1), 'RGB')
         return image
 
-    def _load_target(self, id: int):
-        annotations = super()._load_target(id)
-        if len(annotations) != 1:
-            a=1
-        return self.coco.loadAnns(self.coco.getAnnIds(id))
-
 
 def get_transform():
     return T.Compose([
@@ -89,12 +83,6 @@ dataset = datasets.wrap_dataset_for_transforms_v2(dataset, target_keys=("image_i
 
 dataset_val = DeepLesion(IMAGES_PATH, ANNOTATIONS_VAL, transforms=get_transform())
 dataset_val = datasets.wrap_dataset_for_transforms_v2(dataset_val, target_keys=("image_id", "boxes", "labels"))
-
-from tqdm import tqdm
-for images, targets in tqdm(dataset):
-    a=1
-
-a=1
 
 
 def get_model_instance_segmentation(num_classes):
