@@ -1,10 +1,9 @@
 import os
-import cv2
+
 import torch
 import torch.utils.data
 import torchvision
-import numpy as np
-from PIL import Image
+import torchvision.transforms as T
 from pycocotools import mask as coco_mask
 from pycocotools.coco import COCO
 
@@ -189,41 +188,8 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         super().__init__(img_folder, ann_file)
         self._transforms = transforms
 
-    def clip_and_normalize(self,
-                           np_image: np.ndarray,
-                           clip_min: int = -150,
-                           clip_max: int = 250
-                           ) -> np.ndarray:
-        np_image = np.clip(np_image, clip_min, clip_max)
-        np_image = (np_image - clip_min) / (clip_max - clip_min)
-        return np_image
-
-    def load(self, index: int):
-
-        if not isinstance(index, int):
-            raise ValueError(f"Index must be of type integer, got {type(index)} instead.")
-
-        id = self.ids[index]
-        path = self.coco.loadImgs(id)[0]["file_name"]
-        DICOM_windows = self.coco.loadImgs(id)[0]["windows"]
-
-        # Load Image
-        image = cv2.imread(os.path.join(self.root, path), cv2.IMREAD_UNCHANGED)
-        image = image.astype('int32') - 32768
-        image = self.clip_and_normalize(image, *DICOM_windows)
-        image = (image * 255).astype('uint8')
-        image = Image.fromarray(np.stack([image]*3, axis=-1), 'RGB')
-
-        # Load Target
-        target = self.coco.loadAnns(self.coco.getAnnIds(id))
-
-        if self.transforms is not None:
-            image, target = self.transforms(image, target)
-
-        return image, target
-
     def __getitem__(self, idx):
-        img, target = self.load(idx)
+        img, target = super().__getitem__(idx)
         image_id = self.ids[idx]
         target = dict(image_id=image_id, annotations=target)
         if self._transforms is not None:

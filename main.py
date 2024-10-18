@@ -1,19 +1,16 @@
 import os
 
-import cv2
-import numpy as np
-from PIL import Image
-
 import torch
-import torch.utils.data
-from torchvision import datasets, models, tv_tensors
-from torchvision.transforms import v2 as T
-from open_clip import create_model_from_pretrained, get_tokenizer
-
 import utils
-from engine import train_one_epoch, evaluate
-from model import JointLearning
 
+from engine import train_one_epoch, evaluate
+from deeplesion import DeepLesion, get_transform
+# from model import CustomFasterRCNN
+from model import JointLearning_v2
+
+########################################################################################################################
+# Weights and Biases Logging
+########################################################################################################################
 
 # import wandb
 
@@ -41,74 +38,33 @@ config = {
 # wandb.login()
 # wandb.init(project='JointLearning', entity="farrell236", config=config, name=f'fasterrcnn')
 
-torch.manual_seed(0)
+
+########################################################################################################################
+# Train on GPU or CPU
+########################################################################################################################
+
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 
+########################################################################################################################
+# DeepLesion Dataloader
+########################################################################################################################
 
-class DeepLesion(datasets.CocoDetection):
-
-    def __init__(self, *args, **kwargs):
-        super(DeepLesion, self).__init__(*args, **kwargs)
-        self.tokenizer = get_tokenizer('hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224')
-
-    def clip_and_normalize(self,
-                           np_image: np.ndarray,
-                           clip_min: int = -150,
-                           clip_max: int = 250
-                           ) -> np.ndarray:
-        np_image = np.clip(np_image, clip_min, clip_max)
-        np_image = (np_image - clip_min) / (clip_max - clip_min)
-        return np_image
-
-    def _load_image(self, id: int) -> Image.Image:
-        path = self.coco.loadImgs(id)[0]["file_name"]
-        DICOM_windows = self.coco.loadImgs(id)[0]["windows"]
-
-        # Load Image
-        image = cv2.imread(os.path.join(self.root, path), cv2.IMREAD_UNCHANGED)
-        image = image.astype('int32') - 32768
-        image = self.clip_and_normalize(image, *DICOM_windows)
-        image = (image * 255).astype('uint8')
-        image = Image.fromarray(np.stack([image]*3, axis=-1), 'RGB')
-        return image
-
-    def _load_target(self, id: int):
-        annotations = super()._load_target(id)
-        h = self.coco.loadImgs(id)[0]['height']
-        w = self.coco.loadImgs(id)[0]['width']
-        # Group annotations into a single target dictionary
-        # One image can have >1 annotations
-        return {
-            'caption': [self.tokenizer(ann['caption'])[0] for ann in annotations],
-            'image_id': annotations[0]['image_id'],
-            'boxes': tv_tensors.BoundingBoxes(
-                [ann['bbox'] for ann in annotations],
-                format="XYXY",
-                canvas_size=(h, w)
-            ),
-            'labels': torch.tensor([ann['category_id'] for ann in annotations])
-        }
-
-def get_transform():
-    return T.Compose([
-        T.ToImage(),
-        T.Resize((224, 224)),
-        T.ToDtype(torch.float, scale=True),
-    ])
-
-
+# JSON with captions
+# TOKENIZER = 'microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224'  # JointLearning_v1
+TOKENIZER = 'microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract'  # JointLearning_v2
 IMAGES_PATH = '/data/houbb/data/DeepLesion/Images_png'
 ANNOTATIONS_TRAIN = 'data/cococaption_train_deeplesion.json'
 ANNOTATIONS_VAL = 'data/cococaption_val_deeplesion.json'
 
+# JSON without captions (https://github.com/urmagicsmine/MVP-Net/blob/master/data/DeepLesion/annotation)
+# TOKENIZER = None
+# IMAGES_PATH = '/data/houbb/data/DeepLesion/Images_png'
+# ANNOTATIONS_TRAIN = '/data/houbb/data/DeepLesion/annotation/deeplesion_train.json'
+# ANNOTATIONS_VAL = '/data/houbb/data/DeepLesion/annotation/deeplesion_val.json'
 
-dataset = DeepLesion(IMAGES_PATH, ANNOTATIONS_TRAIN, transforms=get_transform())
-dataset_val = DeepLesion(IMAGES_PATH, ANNOTATIONS_VAL, transforms=get_transform())
-
-
-# train on the GPU or on the CPU, if a GPU is not available
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-
+dataset = DeepLesion(root=IMAGES_PATH, annFile=ANNOTATIONS_TRAIN, transforms=get_transform(), tokenizer=TOKENIZER)
+dataset_val = DeepLesion(root=IMAGES_PATH, annFile=ANNOTATIONS_VAL, transforms=get_transform(), tokenizer=TOKENIZER)
 
 # define training and validation data loaders
 data_loader = torch.utils.data.DataLoader(
@@ -126,12 +82,19 @@ data_loader_test = torch.utils.data.DataLoader(
     collate_fn=utils.collate_fn
 )
 
-# get the model using our helper function
-model = JointLearning(num_classes=2)
 
-# move model to the right device
+########################################################################################################################
+# Model
+########################################################################################################################
+
+# model = CustomFasterRCNN(num_classes=2)
+model = JointLearning_v2(num_classes=2)
 model.to(device)
 
+
+########################################################################################################################
+# Optimizer and Logging
+########################################################################################################################
 
 # construct an optimizer
 params = [p for p in model.parameters() if p.requires_grad]
@@ -149,12 +112,15 @@ lr_scheduler = torch.optim.lr_scheduler.StepLR(
     gamma=config['gamma']
 )
 
+
+########################################################################################################################
+# Training Loop
+########################################################################################################################
+
 metrics_names = [
     'AP', 'AP50', 'AP75', 'AP_small', 'AP_medium', 'AP_large',
     'AR1', 'AR10', 'AR100', 'AR_small', 'AR_medium', 'AR_large'
 ]
-
-# out = log_eval_stats = evaluate(model, data_loader_test, device=device)
 
 # Start training
 for epoch in range(config['num_epochs']):
@@ -162,7 +128,7 @@ for epoch in range(config['num_epochs']):
     log_train = train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq=10)
     log_train = {key: meter.value for key, meter in log_train.meters.items()}
     # save model
-    torch.save(model.state_dict(), f'{config["model_save_folder"]}/jointmodel_{epoch}.pth')
+    # torch.save(model.state_dict(), f'{config["model_save_folder"]}/jointmodel_clip_{epoch}.pth')
     # update the learning rate
     lr_scheduler.step()
     # evaluate on the test dataset
@@ -170,5 +136,3 @@ for epoch in range(config['num_epochs']):
     bbox_stats = log_eval.coco_eval['bbox'].stats
     bbox_stats = {f'bbox {name}': bbox_stats[idx] for idx, name in enumerate(metrics_names)}
     # wandb.log({**log_train, **bbox_stats})
-
-
