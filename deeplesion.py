@@ -15,8 +15,7 @@ class DeepLesion(datasets.CocoDetection):
 
     def __init__(self, *args, tokenizer=None, **kwargs):
         super().__init__(*args, **kwargs)
-        if tokenizer is not None:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer) if tokenizer else None
 
     def clip_and_normalize(self,
                            np_image: np.ndarray,
@@ -44,10 +43,12 @@ class DeepLesion(datasets.CocoDetection):
         annotations = super()._load_target(id)
         h = self.coco.loadImgs(id)[0]['height']
         w = self.coco.loadImgs(id)[0]['width']
+        filename = self.coco.loadImgs(id)[0]["file_name"]
 
         # Group annotations into a single target dictionary
         # One image can have >1 annotations
         target = {
+            'filename': filename,  # for debugging
             'image_id': annotations[0]['image_id'],
             'boxes': T.functional.convert_bounding_box_format(
                 tv_tensors.BoundingBoxes(
@@ -60,10 +61,9 @@ class DeepLesion(datasets.CocoDetection):
             'labels': torch.tensor([ann['category_id'] for ann in annotations])
         }
 
-        # Check if any annotation contains a 'caption' key
-        captions = [ann['caption'] for ann in annotations if 'caption' in ann]
-        if captions:
+        if self.tokenizer:
             # Join all captions into one sentence in random order
+            captions = [ann['caption'] for ann in annotations if 'caption' in ann]
             caption_text = ' [SEP] '.join(random.sample(captions, len(captions)))
             target['caption'] = self.tokenizer(
                 caption_text,
