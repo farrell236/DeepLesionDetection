@@ -146,33 +146,45 @@ class JointLearning_v1(nn.Module):
 # JointLearning_v2 Model
 ########################################################################################################################
 
+class ProjectionHead(nn.Module):
+    def __init__(self, embedding_dim: int, projection_dim: int, dropout: float) -> None:
+        super().__init__()
+        self.projection = nn.Linear(embedding_dim, projection_dim)
+        self.gelu = nn.GELU()
+        self.fc = nn.Linear(projection_dim, projection_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(projection_dim)
+
+    def forward(self, x):
+        projected = self.projection(x)
+        x = self.gelu(projected)
+        x = self.fc(x)
+        x = self.dropout(x)
+        x += projected
+        return self.layer_norm(x)
+
+
 class TextEncoder(nn.Module):
-    def __init__(self, embed_dim, proj_dim):
+    def __init__(self):
         super().__init__()
         self.model = AutoModelForMaskedLM.from_pretrained(
             pretrained_model_name_or_path="microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract",
             output_hidden_states=True)
-        self.projection = nn.Linear(embed_dim, proj_dim)
-        self.layer_norm = nn.LayerNorm(proj_dim)
 
     def forward(self, texts):
         x = self.model(input_ids=texts['input_ids'], attention_mask=texts['attention_mask'])['hidden_states'][-1]
         x = x[:, 0, :]  # B, T[cls], E
-        x = self.projection(x)
-        x = self.layer_norm(x)
         return x
 
 
 class ImageEncoder(nn.Module):
-    def __init__(self, base_model, embed_dim, proj_dim):
+    def __init__(self, base_model):
         super().__init__()
 
         self.model = nn.Sequential(
             base_model,
             nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
-            nn.Linear(embed_dim, proj_dim),
-            nn.LayerNorm(proj_dim)
         )
 
     def forward(self, x):
@@ -183,16 +195,28 @@ class CLIPModel(nn.Module):
     def __init__(self, base_model):
         super().__init__()
 
-        self.image_encoder = ImageEncoder(base_model=base_model, embed_dim=1280, proj_dim=256)
-        self.text_encoder = TextEncoder(embed_dim=768, proj_dim=256)
+        self.image_encoder = ImageEncoder(base_model)
+        self.text_encoder = TextEncoder()
+        self.image_projection = ProjectionHead(
+            embedding_dim=2048,
+            projection_dim=256,
+            dropout=0.1
+        )
+        self.text_projection = ProjectionHead(
+            embedding_dim=768,
+            projection_dim=256,
+            dropout=0.1
+        )
 
-        self.temperature = nn.Parameter(torch.ones([])*np.log(1/0.07))
+        self.temperature = 1.  # nn.Parameter(torch.ones([])*np.log(1/0.07))
 
     def forward(self, images, texts):
         image_features = self.image_encoder(images)
         text_features = self.text_encoder(texts)
+        image_embeddings = self.image_projection(image_features)
+        text_embeddings = self.text_projection(text_features)
 
-        return image_features, text_features, self.temperature.exp()
+        return image_embeddings, text_embeddings, self.temperature
 
 
 class JointLearning_v2(nn.Module):
@@ -200,8 +224,13 @@ class JointLearning_v2(nn.Module):
     def __init__(self, num_classes=2):
         super(JointLearning_v2, self).__init__()
 
-        backbone = torchvision.models.mobilenet_v2(weights="DEFAULT").features
-        backbone.out_channels = 1280
+        base_model = torchvision.models.resnet152(weights="DEFAULT")
+        modules = list(base_model.children())[:-2]
+        base_model = nn.Sequential(*modules)
+        base_model.out_channels = 2048
+
+        # backbone = torchvision.models.mobilenet_v2(weights="DEFAULT").features
+        # backbone.out_channels = 1280
 
         anchor_generator = AnchorGenerator(
             sizes=((32, 64, 128, 256, 512),),
@@ -215,19 +244,21 @@ class JointLearning_v2(nn.Module):
         )
 
         self.detection_model = FasterRCNN(
-            backbone,
+            # backbone,
+            base_model,
             num_classes=num_classes,
             rpn_anchor_generator=anchor_generator,
             box_roi_pool=roi_pooler
         )
 
-        # state_dict = torch.load('jointmodel/jointmodel_9.pth')
-        # self.detection_model.load_state_dict(state_dict)
+        # state_dict = torch.load('checkpoints/pretrain/resnet152_fasterrcnn_9.pth')
+        state_dict = torch.load('checkpoints/pretrain/detection_model_weights.pth')
+        self.detection_model.load_state_dict(state_dict)
         # for param in self.detection_model.parameters():
         #     param.requires_grad = False
 
-        self.clip_model = CLIPModel(backbone)
-        self.clip_loss = nn.CrossEntropyLoss()
+        self.clip_model = CLIPModel(base_model)
+        self.log_softmax = nn.LogSoftmax(dim=-1)
         self.dummy_param = nn.Parameter(torch.empty(0))
 
     def forward(self, images, targets=None):
@@ -241,12 +272,18 @@ class JointLearning_v2(nn.Module):
             for key in keys:
                 text_collated[key] = torch.cat([d['caption'][key] for d in targets], dim=0).to(self.dummy_param.device)
 
-            image_features, text_features, logit_scale = self.clip_model(images_collated, text_collated)
-            logits = logit_scale * image_features @ text_features.t()
-            labels = torch.arange(len(images_collated)).to(self.dummy_param.device)
-            clip_loss = self.clip_loss(logits, labels)
+            image_embeddings, text_embeddings, temperature = self.clip_model(images_collated, text_collated)
+            logits = (text_embeddings @ image_embeddings.T) / temperature
+            images_similarity = image_embeddings @ image_embeddings.T
+            texts_similarity = text_embeddings @ text_embeddings.T
+            targets = nn.functional.softmax(
+                (images_similarity + texts_similarity) / 2 * temperature, dim=-1
+            )
+            images_loss = (-targets.T * self.log_softmax(logits.T)).sum(1)
+            texts_loss = (-targets * self.log_softmax(logits)).sum(1)
+            clip_loss = ((images_loss + texts_loss) / 2.0).mean()
 
-            loss_dict.update({'loss_clip': clip_loss})
+            loss_dict.update({'loss_clip': clip_loss * 0.1})
 
         return loss_dict
 
