@@ -4,105 +4,21 @@ import torchvision
 from torch import nn
 import torch.nn.functional as F
 
-import numpy as np
-
 from tqdm import tqdm
-
-from transformers import AutoTokenizer, AutoModelForMaskedLM
+from model import CLIPModel
+from deeplesion import DeepLesion, get_transform
 
 
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-
-class ProjectionHead(nn.Module):
-    def __init__(self, embedding_dim: int, projection_dim: int, dropout: float) -> None:
-        super().__init__()
-        self.projection = nn.Linear(embedding_dim, projection_dim)
-        self.gelu = nn.GELU()
-        self.fc = nn.Linear(projection_dim, projection_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.layer_norm = nn.LayerNorm(projection_dim)
-
-    def forward(self, x):
-        projected = self.projection(x)
-        x = self.gelu(projected)
-        x = self.fc(x)
-        x = self.dropout(x)
-        x += projected
-        return self.layer_norm(x)
-
-
-class TextEncoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.model = AutoModelForMaskedLM.from_pretrained(
-            pretrained_model_name_or_path="microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract",
-            output_hidden_states=True)
-
-    def forward(self, texts):
-        x = self.model(input_ids=texts['input_ids'], attention_mask=texts['attention_mask'])['hidden_states'][-1]
-        x = x[:, 0, :]  # B, T[cls], E
-        return x
-
-
-class ImageEncoder(nn.Module):
-    def __init__(self, base_model):
-        super().__init__()
-
-        self.model = nn.Sequential(
-            base_model,
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-        )
-
-    def forward(self, x):
-        return self.model(x)
-
-
-class CLIPModel(nn.Module):
-    def __init__(self, base_model):
-        super().__init__()
-
-        self.image_encoder = ImageEncoder(base_model)
-        self.text_encoder = TextEncoder()
-        self.image_projection = ProjectionHead(
-            embedding_dim=2048,
-            projection_dim=256,
-            dropout=0.1
-        )
-        self.text_projection = ProjectionHead(
-            embedding_dim=768,
-            projection_dim=256,
-            dropout=0.1
-        )
-
-        self.temperature = 1.  # nn.Parameter(torch.ones([])*np.log(1/0.07))
-
-    def forward(self, images, texts):
-        image_features = self.image_encoder(images)
-        text_features = self.text_encoder(texts)
-        image_embeddings = self.image_projection(image_features)
-        text_embeddings = self.text_projection(text_features)
-
-        return image_embeddings, text_embeddings, self.temperature
-
-
-a=1
-
-
-
-
 base_model = torchvision.models.resnet152(pretrained=True)
 modules = list(base_model.children())[:-2]
 base_model = nn.Sequential(*modules, nn.AdaptiveAvgPool2d((1, 1)))
-# base_model = torchvision.models.mobilenet_v2(pretrained=True).features
 clip_model = CLIPModel(base_model)
 clip_model.to(device)
 
 
 a=1
-
-from deeplesion import DeepLesion, get_transform
 
 
 def custom_collate_fn(batch):
@@ -177,7 +93,7 @@ for epoch in range(100):  # Adjust the number of epochs as needed
         total_loss += loss.item()
 
     print(f"Epoch {epoch + 1}, Loss: {total_loss / len(data_loader)}")
-    # torch.save(clip_model.state_dict(), f'checkpoints_clip/clip_{epoch}.pth')
+    torch.save(clip_model.state_dict(), f'checkpoints/clip/clip_{epoch}.pth')
 
     # Evaluation
     clip_model.eval()

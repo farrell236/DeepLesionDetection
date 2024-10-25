@@ -1,1 +1,3 @@
 .idea
+data/*
+!data/merge_data.py
